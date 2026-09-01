@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Job Platform — Live Status</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --border: #2a2e3a;
+    --text: #e6e8ee;
+    --muted: #8a8f9e;
+    --accent: #5b9dff;
+    --accent2: #ffb454;
+    --good: #4ade80;
+    --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 24px;
+  }
+  h1 {
+    font-size: 1.3rem;
+    font-weight: 600;
+    margin: 0 0 4px;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-bottom: 24px;
+  }
+  .subtitle .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--good);
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .subtitle .dot.stale { background: var(--bad); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .tile {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .tile .label {
+    color: var(--muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 6px;
+  }
+  .tile .value {
+    font-size: 1.6rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .tile .value.good { color: var(--good); }
+  .tile .value.bad { color: var(--bad); }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .panel h2 {
+    font-size: 0.95rem;
+    margin: 0 0 12px;
+    font-weight: 600;
+  }
+  .legend {
+    display: flex;
+    gap: 18px;
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .legend span::before {
+    content: "";
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .legend .jobs::before { background: var(--accent); }
+  .legend .retry::before { background: var(--accent2); }
+  canvas { width: 100%; height: 220px; display: block; }
+  footer {
+    margin-top: 20px;
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+  code {
+    background: #000000aa;
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Job Platform — Live Status</h1>
+<div class="subtitle"><span class="dot" id="live-dot"></span><span id="live-text">connecting…</span></div>
+
+<div class="grid">
+  <div class="tile"><div class="label">Queued</div><div class="value" id="v-queued">—</div></div>
+  <div class="tile"><div class="label">Running</div><div class="value" id="v-running">—</div></div>
+  <div class="tile"><div class="label">Pending (blocked)</div><div class="value" id="v-pending">—</div></div>
+  <div class="tile"><div class="label">Succeeded (total)</div><div class="value good" id="v-succeeded">—</div></div>
+  <div class="tile"><div class="label">Failed (total)</div><div class="value bad" id="v-failed">—</div></div>
+  <div class="tile"><div class="label">Dead-lettered (total)</div><div class="value bad" id="v-dead">—</div></div>
+  <div class="tile"><div class="label">Retry attempts (total)</div><div class="value" id="v-retries">—</div></div>
+  <div class="tile"><div class="label">Throughput</div><div class="value" id="v-throughput">—</div></div>
+  <div class="tile"><div class="label">Failure rate</div><div class="value" id="v-failrate">—</div></div>
+</div>
+
+<div class="panel">
+  <h2>RabbitMQ queue depth (live)</h2>
+  <div class="legend">
+    <span class="jobs">jobs (ready to run)</span>
+    <span class="retry">jobs.retry (backoff wait)</span>
+  </div>
+  <canvas id="chart"></canvas>
+</div>
+
+<footer>
+  Polls <code>GET /metrics</code> every 2s. No external JS/CSS — this page
+  is the "lightweight status page" alternative to Grafana (see CLAUDE.md
+  Phase 6 / README).
+</footer>
+
+<script>
+const POLL_INTERVAL_MS = 2000;
+const HISTORY_LENGTH = 90; // 3 minutes at 2s/sample
+
+const history = []; // {t, jobsDepth, retryDepth}
+let prevSucceeded = null;
+let prevTimestamp = null;
+
+function parsePrometheusText(text) {
+  const metrics = {};
+  for (const line of text.split("\n")) {
+    if (!line || line.startsWith("#")) continue;
+    const m = line.match(/^(\w+)(?:\{([^}]*)\})?\s+([-\d.eE+]+)\s*$/);
+    if (!m) continue;
+    const [, name, labelStr, valueStr] = m;
+    let label = "_";
+    if (labelStr) {
+      const lm = labelStr.match(/="([^"]*)"/);
+      if (lm) label = lm[1];
+    }
+    if (!metrics[name]) metrics[name] = {};
+    metrics[name][label] = parseFloat(valueStr);
+  }
+  return metrics;
+}
+
+function setText(id, value) {
+  document.getElementById(id).textContent = value;
+}
+
+function drawChart() {
+  const canvas = document.getElementById("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  const w = rect.width, h = rect.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (history.length < 2) return;
+
+  const maxDepth = Math.max(1, ...history.map(p => Math.max(p.jobsDepth, p.retryDepth)));
+  const stepX = w / (HISTORY_LENGTH - 1);
+  const startIdx = HISTORY_LENGTH - history.length;
+
+  // grid lines
+  ctx.strokeStyle = "#2a2e3a";
+  ctx.lineWidth = 1;
+  for (let gy = 0; gy <= 4; gy++) {
+    const y = (h - 20) * (gy / 4) + 10;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  function drawLine(key, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    history.forEach((p, i) => {
+      const x = (startIdx + i) * stepX;
+      const y = h - 10 - (p[key] / maxDepth) * (h - 20);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  drawLine("jobsDepth", "#5b9dff");
+  drawLine("retryDepth", "#ffb454");
+}
+
+async function tick() {
+  try {
+    const res = await fetch("/metrics", { cache: "no-store" });
+    if (!res.ok) throw new Error("bad status " + res.status);
+    const text = await res.text();
+    const m = parsePrometheusText(text);
+    const now = Date.now();
+
+    const queued = m.job_status_count?.queued ?? 0;
+    const running = m.job_status_count?.running ?? 0;
+    const pending = m.job_status_count?.pending ?? 0;
+    const succeeded = m.jobs_terminal_total?.succeeded ?? 0;
+    const failed = m.jobs_terminal_total?.failed ?? 0;
+    const dead = m.jobs_terminal_total?.dead_letter ?? 0;
+    const retries = m.job_retry_count_total?._ ?? 0;
+    const jobsDepth = m.rabbitmq_queue_messages?.jobs ?? 0;
+    const retryDepth = m.rabbitmq_queue_messages?.["jobs.retry"] ?? 0;
+
+    setText("v-queued", queued);
+    setText("v-running", running);
+    setText("v-pending", pending);
+    setText("v-succeeded", succeeded);
+    setText("v-failed", failed);
+    setText("v-dead", dead);
+    setText("v-retries", retries);
+
+    const terminalTotal = succeeded + failed + dead;
+    const failRate = terminalTotal > 0 ? ((failed + dead) / terminalTotal) * 100 : 0;
+    setText("v-failrate", terminalTotal > 0 ? failRate.toFixed(1) + "%" : "—");
+
+    if (prevSucceeded !== null && prevTimestamp !== null) {
+      const dt = (now - prevTimestamp) / 1000;
+      const rate = dt > 0 ? (succeeded - prevSucceeded) / dt : 0;
+      setText("v-throughput", rate.toFixed(2) + " jobs/s");
+    }
+    prevSucceeded = succeeded;
+    prevTimestamp = now;
+
+    history.push({ t: now, jobsDepth, retryDepth });
+    while (history.length > HISTORY_LENGTH) history.shift();
+    drawChart();
+
+    document.getElementById("live-dot").classList.remove("stale");
+    document.getElementById("live-text").textContent = "live";
+  } catch (err) {
+    document.getElementById("live-dot").classList.add("stale");
+    document.getElementById("live-text").textContent = "disconnected — retrying…";
+  }
+}
+
+tick();
+setInterval(tick, POLL_INTERVAL_MS);
+window.addEventListener("resize", drawChart);
+</script>
+
+</body>
+</html>

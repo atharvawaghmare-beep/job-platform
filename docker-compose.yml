@@ -1,0 +1,101 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobplatform}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobplatform}
+      POSTGRES_DB: ${POSTGRES_DB:-jobplatform}
+    ports:
+      # Host-side port bumped to 5433 to avoid clashing with other local
+      # Postgres containers/instances on 5432. Internal traffic (api ->
+      # postgres) always uses the container's 5432, unaffected by this.
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobplatform} -d ${POSTGRES_DB:-jobplatform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-jobplatform}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-jobplatform}
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # management UI
+      - "15692:15692" # Prometheus metrics (used by api/app/routers/metrics.py)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override host-relative defaults from .env with in-network service names.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobplatform}:${POSTGRES_PASSWORD:-jobplatform}@postgres:5432/${POSTGRES_DB:-jobplatform}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-jobplatform}:${RABBITMQ_PASSWORD:-jobplatform}@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
+      # For GET /metrics's queue-depth queries against RabbitMQ's own
+      # Prometheus plugin — a different port/protocol than RABBITMQ_URL
+      # (AMQP) above, and unauthenticated (see app/config.py).
+      RABBITMQ_PROMETHEUS_URL: http://rabbitmq:15692
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./api:/app
+      # Mounted after (and therefore layered on top of) ./api:/app above, so
+      # the shared package stays live-editable instead of being shadowed by
+      # the host api/ dir (which has no common/ subdirectory of its own).
+      - ./common:/app/common
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobplatform}:${POSTGRES_PASSWORD:-jobplatform}@postgres:5432/${POSTGRES_DB:-jobplatform}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-jobplatform}:${RABBITMQ_PASSWORD:-jobplatform}@rabbitmq:5672/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./worker:/app
+      - ./common:/app/common
+    # No --reload equivalent for a plain consumer loop: after editing worker
+    # code, run `docker compose restart worker` to pick it up.
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

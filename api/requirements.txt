@@ -1,0 +1,17 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic-settings>=2.4,<3
+
+# DB: async driver for the app, sync driver for Alembic migrations.
+sqlalchemy[asyncio]>=2.0,<3
+asyncpg>=0.29,<1
+psycopg2-binary>=2.9,<3
+alembic>=1.13,<2
+
+redis>=5.0,<6
+aio-pika>=9.4,<10
+
+# Used by GET /metrics to query RabbitMQ's HTTP management API for real
+# queue depths (not just test-only anymore, hence promoted out of
+# requirements-dev.txt).
+httpx>=0.27,<1

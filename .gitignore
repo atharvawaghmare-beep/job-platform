@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Env files (never commit real secrets/connection strings)
+.env
+.env.*
+!.env.example
+
+# Docker / editors
+*.log
+.vscode/
+.idea/
+
+# Alembic (keep versions/ tracked, ignore local sqlite fallback if ever used)
+*.sqlite3
